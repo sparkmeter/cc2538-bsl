@@ -62,6 +62,15 @@ try:
 except ImportError:
     have_hex_support = False
 
+try:
+    import RPi.GPIO as GPIO
+    GPIO.setmode(GPIO.BOARD)
+    reset_pin = 11
+    bl_pin = 12
+    rpi_gpio_is_setup = True
+except (ImportError, AttributeError):
+    rpi_gpio_is_setup = False
+
 # version
 __version__ = "2.1"
 
@@ -225,7 +234,7 @@ class CommandInterface(object):
 
         self.sp.open()
 
-    def invoke_bootloader(self, dtr_active_high=False, inverted=False):
+    def invoke_bootloader(self, dtr_active_high=False, inverted=False, use_rpi=False):
         # Use the DTR and RTS lines to control bootloader and the !RESET pin.
         # This can automatically invoke the bootloader without the user
         # having to toggle any pins.
@@ -234,32 +243,76 @@ class CommandInterface(object):
         # DTR: connected to the bootloader pin
         # RTS: connected to !RESET
         # If inverted is True, pin connections are the other way round
-        if inverted:
-            set_bootloader_pin = self.sp.setRTS
-            set_reset_pin = self.sp.setDTR
+        
+        # If use_rpi is True, pins for TX, RX, DTR and RTS are mapped onto
+        # pins on the Raspberry Pi
+        # TX  -> RPi GPIO 14
+        # RX  -> RPi GPIO 15
+        # RTS -> RPi GPIO 17
+        # DTR -> RPi GPIO 18
+
+        if(use_rpi):
+            if(rpi_gpio_is_setup):
+                if inverted:
+                    set_bootloader_pin = reset_pin
+                    set_reset_pin = bl_pin
+                else:
+                    set_bootloader_pin = bl_pin
+                    set_reset_pin = reset_pin
+
+                GPIO.setup(set_bootloader_pin,GPIO.OUT)
+                GPIO.setup(set_reset_pin,GPIO.OUT)
+
+                if dtr_active_high:
+                    GPIO.output(set_bootloader_pin, GPIO.HIGH)
+                else:
+                    GPIO.output(set_bootloader_pin, GPIO.LOW)
+                
+                # GPIO pins take a small delay to toggle
+                time.sleep(0.01)
+                # RESET pin is active LOW 
+                GPIO.output(set_reset_pin, GPIO.HIGH)
+                time.sleep(0.01)
+                GPIO.output(set_reset_pin, GPIO.LOW)
+                time.sleep(0.01)
+                GPIO.output(set_reset_pin, GPIO.HIGH)
+                time.sleep(0.01)
+
+                if dtr_active_high:
+                    GPIO.output(set_bootloader_pin, GPIO.LOW)
+                else:
+                    GPIO.output(set_bootloader_pin, GPIO.HIGH)
+            else:
+                print('RPi GPIO not setup. Use pip/pip3 install RPi.GPIO')
+                sys.exit(1)
+
         else:
-            set_bootloader_pin = self.sp.setDTR
-            set_reset_pin = self.sp.setRTS
+            if inverted:
+                set_bootloader_pin = self.sp.setRTS
+                set_reset_pin = self.sp.setDTR
+            else:
+                set_bootloader_pin = self.sp.setDTR
+                set_reset_pin = self.sp.setRTS
 
-        set_bootloader_pin(1 if not dtr_active_high else 0)
-        set_reset_pin(0)
-        set_reset_pin(1)
-        set_reset_pin(0)
-        # Make sure the pin is still asserted when the chip
-        # comes out of reset. This fixes an issue where
-        # there wasn't enough delay here on Mac.
-        time.sleep(0.002)
-        set_bootloader_pin(0 if not dtr_active_high else 1)
+            set_bootloader_pin(1 if not dtr_active_high else 0)
+            set_reset_pin(0)
+            set_reset_pin(1)
+            set_reset_pin(0)
+            # Make sure the pin is still asserted when the chip
+            # comes out of reset. This fixes an issue where
+            # there wasn't enough delay here on Mac.
+            time.sleep(0.002)
+            set_bootloader_pin(0 if not dtr_active_high else 1)
 
-        # Some boards have a co-processor that detects this sequence here and
-        # then drives the main chip's BSL enable and !RESET pins. Depending on
-        # board design and co-processor behaviour, the !RESET pin may get
-        # asserted after we have finished the sequence here. In this case, we
-        # need a small delay so as to avoid trying to talk to main chip before
-        # it has actually entered its bootloader mode.
-        #
-        # See contiki-os/contiki#1533
-        time.sleep(0.1)
+            # Some boards have a co-processor that detects this sequence here and
+            # then drives the main chip's BSL enable and !RESET pins. Depending on
+            # board design and co-processor behaviour, the !RESET pin may get
+            # asserted after we have finished the sequence here. In this case, we
+            # need a small delay so as to avoid trying to talk to main chip before
+            # it has actually entered its bootloader mode.
+            #
+            # See contiki-os/contiki#1533
+            time.sleep(0.1)
 
     def close(self):
         self.sp.close()
@@ -1002,6 +1055,7 @@ def usage():
     --bootloader-active-high Use active high signals to enter bootloader
     --bootloader-invert-lines Inverts the use of RTS and DTR to enter bootloader
     -D, --disable-bootloader After finishing, disable the bootloader
+    --use-rpi                Uses RPi UART TX, RX, and GPIO pins for DTR and RTS
     --version                Print script version
 
 Examples:
@@ -1027,7 +1081,8 @@ if __name__ == "__main__":
             'ieee_address': 0,
             'bootloader_active_high': False,
             'bootloader_invert_lines': False,
-            'disable-bootloader': 0
+            'disable-bootloader': 0,
+            'use-rpi': 0
         }
 
 # http://www.python.org/doc/2.5.2/lib/module-getopt.html
@@ -1038,7 +1093,8 @@ if __name__ == "__main__":
                                    ['help', 'ieee-address=',
                                     'disable-bootloader',
                                     'bootloader-active-high',
-                                    'bootloader-invert-lines', 'version'])
+                                    'bootloader-invert-lines',
+                                    'use-rpi', 'version'])
     except getopt.GetoptError as err:
         # print help information and exit:
         print(str(err))  # will print something like "option -a not recognized"
@@ -1080,6 +1136,8 @@ if __name__ == "__main__":
             conf['bootloader_invert_lines'] = True
         elif o == '-D' or o == '--disable-bootloader':
             conf['disable-bootloader'] = 1
+        elif o == '--use-rpi':
+            conf['use-rpi'] = True
         elif o == '--version':
             print_version()
             sys.exit(0)
@@ -1137,7 +1195,8 @@ if __name__ == "__main__":
         cmd = CommandInterface()
         cmd.open(conf['port'], conf['baud'])
         cmd.invoke_bootloader(conf['bootloader_active_high'],
-                              conf['bootloader_invert_lines'])
+                              conf['bootloader_invert_lines'],
+                              conf['use-rpi'])
         mdebug(5, "Opening port %(port)s, baud %(baud)d"
                % {'port': conf['port'], 'baud': conf['baud']})
         if conf['write'] or conf['verify']:
